@@ -1,3 +1,5 @@
+import std/tables
+import std/algorithm
 import std/hashes
 import std/os
 import std/parsecfg
@@ -5,11 +7,17 @@ import std/strutils
 import std/streams
 import std/strtabs
 
+include testament/testament
+include testament/specs
+
 import testutils/config
 
 type
   TestOutputs* = StringTableRef
   TestSpec* = ref object
+    cmd*: string           # testament likes to provide a compiler call
+    check*: TOutputCheck
+    shim*: bool            # a shim has no test file per se
     section*: string
     args*: string
     config*: TestConfig
@@ -30,6 +38,7 @@ type
     child*: TestSpec
 
 const
+  defaultOptions* = "--verbosity:1 --warnings:on "
   DefaultOses = @["linux", "macosx", "windows"]
 
 proc hash*(spec: TestSpec): Hash =
@@ -37,16 +46,6 @@ proc hash*(spec: TestSpec): Hash =
   h = h !& spec.config.hash
   h = h !& spec.flags.hash
   h = h !& spec.os.hash
-  result = !$h
-
-proc binaryHash*(spec: TestSpec; backend: string): Hash =
-  ## hash the backend, any compilation flags, and defines, etc.
-  var h: Hash = 0
-  h = h !& backend.hash
-  h = h !& spec.os.hash
-  h = h !& hash(spec.config.flags * compilerFlags)
-  h = h !& hash(spec.flags)
-  h = h !& spec.program.hash
   result = !$h
 
 proc newTestOutputs*(): StringTableRef =
@@ -86,10 +85,54 @@ iterator binaries*(spec: TestSpec): string =
   for backend in spec.config.backends.items:
     yield spec.binary(backend)
 
+proc compilerCommand*(spec: TestSpec; backend: string): string =
+  ## create an appropriate compiler command line for the test/backend
+  let
+    binary = spec.binary(backend)
+    nimcache = spec.config.cache(backend)
+    compilationFlags = spec.config.compilationFlags
+
+  if spec.shim and spec.cmd != "":
+    var
+      map = initTable[string, TTarget](rightSize(1 + TTarget.high.ord))
+    map["cpp"] = TTarget.targetCpp
+    for target in TTarget.low .. TTarget.high:
+      map[($target).toLowerAscii] = target
+    let
+      bend = backend.toLowerAscii
+    if bend notin map:
+      raise newException(ValueError, "unknown backend: " & bend)
+    var
+      args = prepareTestArgs(spec.cmd, spec.path, spec.flags, nimcache,
+                             target = map[backend.toLowerAscii])
+    result = args.join(" ")
+  else:
+    result = findExe("nim")
+    result &= " " & backend
+    result &= " --nimcache:" & nimcache
+    result &= " " & spec.flags
+    result &= " " & spec.config.compilationFlags
+  result &= " --out:" & binary
+  result &= " " & defaultOptions
+  result &= " " & spec.source.quoteShell
+
+proc binaryHash*(spec: TestSpec; backend: string): Hash =
+  ## hash the backend, any compilation flags, and defines, etc.
+  var h: Hash = 0
+  h = h !& backend.hash
+  h = h !& spec.os.hash
+  h = h !& hash(spec.config.flags * compilerFlags)
+  h = h !& hash(spec.flags)
+  h = h !& spec.program.hash
+  h = h !& hash(spec.compilerCommand(backend))
+  result = !$h
+
 proc defaults(spec: var TestSpec) =
   ## assert some default values for a given spec
   spec.os = DefaultOses
+  spec.check = TOutputCheck.ocEqual
   spec.outputs = newTestOutputs()
+  spec.section = "Output"
 
 proc consumeConfigEvent(spec: var TestSpec; event: CfgEvent) =
   ## parse a specification supplied prior to any sections
@@ -125,6 +168,11 @@ proc consumeConfigEvent(spec: var TestSpec; event: CfgEvent) =
 
 proc rewriteTestFile*(spec: TestSpec; outputs: TestOutputs) =
   ## rewrite a test file with updated outputs after having run the tests
+
+  # shims don't have test files, by definition
+  if spec.shim:
+    return
+
   var
     test = loadConfig(spec.path)
   # take the opportunity to update an args statement if necessary
@@ -140,14 +188,39 @@ proc rewriteTestFile*(spec: TestSpec; outputs: TestOutputs) =
     test.setSectionKey(spec.section, name, expected)
   test.writeConfig(spec.path)
 
+proc parseShim(spec: var TestSpec; path: string) =
+  try:
+    let
+      test = path.parseSpec  # parse the file using testament's parser
+    var
+      output = test.output
+    if test.cmd != "":
+      spec.cmd = test.cmd
+    if test.sortoutput:
+      var
+        lines = test.output.splitLines(keepEol = true)
+      lines.sort
+      output = lines.join("")
+    spec.outputs["stdout"] = output & "\n"
+  except Exception as e:
+    echo "not a testament spec: ", spec.path
+    # it's probably unittest...
+
 proc parseTestFile*(config: TestConfig; filePath: string): TestSpec =
   ## parse a test input file into a spec
   result = new(TestSpec)
   result.defaults
+  result.shim = not filePath.endsWith ".test"
   result.path = absolutePath(filePath)
   result.config = config
   result.name = splitFile(result.path).name
   block:
+    # shims don't have a test file, by definition
+    if result.shim:
+      result.program = result.name
+      result.parseShim(result.path)
+      break
+
     var
       f = newFileStream(result.path, fmRead)
     if f == nil:

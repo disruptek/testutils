@@ -2,10 +2,10 @@ import unittest
 
 suite "goats":
   test "pigs":
-    echo "oink"
+    discard
     check true
 
   test "horses":
     expect ValueError:
-      echo "ney"
+      discard
       raise newException(ValueError, "you made an error")

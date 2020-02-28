@@ -21,6 +21,7 @@ const
   --sort:"source,test"        Sort the tests by program and/or test mtime
   --reverse                   Reverse the order of tests
   --random                    Shuffle the order of tests
+  --shim                      Shim tests automagically
   --help                      Display this help and exit
 
   """.unindent.strip
@@ -33,12 +34,13 @@ type
     ReleaseBuild = "--define:release"
     DangerBuild = "--define:danger"
     CpuAffinity = "--affinity"
+    Shim = "--shim"
 
   SortBy* {.pure.} = enum
-    Random   = "random"
     Source   = "source"
     Test     = "test"
     Reverse  = "reverse"
+    Random   = "random"
 
   TestConfig* = object
     path*: string
@@ -110,9 +112,11 @@ proc processArguments*(): TestConfig =
       case key.toLowerAscii
       of "help", "h":
         quit(Usage, QuitSuccess)
+      of "shim":
+        result.flags.incl Shim
       of "reverse", "random":
         let
-          flag = parseEnum[SortBy](value)
+          flag = parseEnum[SortBy](key)
         if flag in result.orderBy:
           result.orderBy.excl flag
         else:

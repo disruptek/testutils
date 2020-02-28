@@ -11,6 +11,9 @@ import std/times
 import std/pegs
 import std/algorithm
 
+# for shimming testament tests
+include testament/specs
+
 import testutils/spec
 import testutils/config
 import testutils/helpers
@@ -31,7 +34,6 @@ const
   # defaultOptions = "--verbosity:1 --warnings:off --hint[Processing]:off " &
   #                  "--hint[Conf]:off --hint[XDeclaredButNotUsed]:off " &
   #                  "--hint[Link]:off --hint[Pattern]:off"
-  defaultOptions = "--verbosity:1 --warnings:on "
   backendOrder = @["c", "cpp", "js"]
 
 type
@@ -154,12 +156,12 @@ proc cmpOutputs(test: TestSpec, outputs: TestOutputs): TestStatus =
 
     # Would be nice to do a real diff here instead of simple compare
     if test.timestampPeg.len > 0:
-      if not cmpIgnorePegs(testOutput, expected,
+      if not cmpIgnorePegs(testOutput, expected, test.check,
                            peg(test.timestampPeg), pegXid):
         logFailure(test, OutputsDiffer, name, expected, testOutput)
         result = FAILED
     else:
-      if not cmpIgnoreDefaultTimestamps(testOutput, expected):
+      if not cmpIgnoreDefaultTimestamps(testOutput, expected, test.check):
         logFailure(test, OutputsDiffer, name, expected, testOutput)
         result = FAILED
 
@@ -174,15 +176,7 @@ proc compile(test: TestSpec; backend: string): TestStatus =
     let
       binary = test.binary(backend)
     var
-      cmd = findExe("nim")
-    cmd &= " " & backend
-    cmd &= " --nimcache:" & test.config.cache(backend)
-    cmd &= " --out:" & binary
-    cmd &= " " & defaultOptions
-    cmd &= " " & test.flags
-    cmd &= " " & test.config.compilationFlags
-    cmd &= " " & test.source.quoteShell
-    var
+      cmd = test.compilerCommand(backend)
       c = parseCmdLine(cmd)
       p = startProcess(command=c[0], args=c[1.. ^1],
                        options={poStdErrToStdOut, poUsePath})
@@ -235,7 +229,7 @@ proc spawnTest(child: var Thread[ThreadPayload]; test: TestSpec;
       child.pinToCpu core
       result = true
 
-proc execute(test: TestSpec): TestStatus =
+proc executeOne(test: TestSpec): TestStatus =
   ## invoke a single test and return a status
   var
     # FIXME: pass a backend
@@ -284,7 +278,7 @@ proc executeAll(test: TestSpec): TestStatus =
     # unthreaded serial test execution
     result = SKIPPED
     while test != nil and result in {OK, SKIPPED}:
-      result = test.execute
+      result = test.executeOne
       test = test.child
 
 proc threadedExecute(payload: ThreadPayload) {.thread.} =
@@ -293,14 +287,14 @@ proc threadedExecute(payload: ThreadPayload) {.thread.} =
     result = FAILED
   if payload.spec.child == nil:
     {.gcsafe.}:
-      result = payload.spec.execute
+      result = payload.spec.executeOne
   else:
     try:
       var
         child: TestThread
       discard child.spawnTest(payload.spec.child, payload.core + 1)
       {.gcsafe.}:
-        result = payload.spec.execute
+        result = payload.spec.executeOne
       child.joinThreads
     except:
       result = FAILED
@@ -324,20 +318,32 @@ proc optimizeOrder(tests: seq[TestSpec];
       of Reverse:
         result.reverse
       of Random:
+        randomize()
         result.shuffle
 
-proc scanTestPath(path: string): seq[string] =
+proc scanTestPath(path: string; ext: string): seq[string] =
   ## add any tests found at the given path
-  if fileExists(path):
+  if fileExists(path) and path.endsWith(ext):
     result.add path
   else:
     for file in walkDirRec path:
-      if file.endsWith ".test":
+      if file.endsWith ext:
         result.add file
 
-proc test(test: TestSpec; backend: string): TestStatus =
+proc findTests(config: TestConfig): seq[TestSpec] =
   let
-    config = test.config
+    testFiles = scanTestPath(config.path, ".test")
+  result = testFiles.mapIt config.parseTestFile(it)
+  if Shim in config.flags:
+    let
+      nimFiles = scanTestPath(config.path, ".nim")
+    for source in nimFiles.items:
+      let
+        source = absolutePath(source)
+      if not result.anyIt it.source == source:
+        result.add config.parseTestFile(source)
+
+proc test(test: TestSpec; backend: string): TestStatus =
   var
     duration: float
 
@@ -431,14 +437,13 @@ proc performTesting(config: TestConfig;
 proc main(): int =
   let
     config = processArguments()
-    testFiles = scanTestPath(config.path)
+    tests = findTests(config)
 
-  if testFiles.len == 0:
+  if tests.len == 0:
     styledEcho(styleBright, "No test files found")
     result = 1
   else:
     var
-      tests = testFiles.mapIt config.parseTestFile(it)
       backends = config.buildBackendTests(tests)
 
     # c > cpp > js

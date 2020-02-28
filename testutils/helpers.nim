@@ -4,6 +4,8 @@ import std/strutils
 import std/streams
 import std/pegs
 
+import testament/specs
+
 type
   CompileInfo* = object
     templFile*: string
@@ -34,7 +36,8 @@ let
   # Thread/process id is unpredictable..
   pegXid* = peg"""'tid' (('=') / ('":') / (': [1m') / (': ') / ('[0m=[94m') / ('>')) \d+"""
 
-proc cmpIgnorePegs*(a, b: string, pegs: varargs[Peg]): bool =
+proc cmpIgnorePegs*(a, b: string, check: TOutputCheck;
+                    pegs: varargs[Peg]): bool =
   ## true when input strings are equal without regard to supplied pegs
   var
     aa = a
@@ -42,22 +45,26 @@ proc cmpIgnorePegs*(a, b: string, pegs: varargs[Peg]): bool =
   for peg in pegs:
     aa = aa.replace(peg, "dummy")
     bb = bb.replace(peg, "dummy")
-  result = aa == bb
+  result = case check
+    of ocEqual: aa == bb
+    of ocIgnore: true
+    of ocSubstr: aa in bb
 
-proc cmpIgnoreTimestamp*(a, b: string, timestamp = ""): bool =
+proc cmpIgnoreTimestamp*(a, b: string, check: TOutputCheck;
+                         timestamp = ""): bool =
   ## true when input strings are equal without regard to supplied timestamp form
   if timestamp.len == 0:
-    result = cmpIgnorePegs(a, b, pegXid)
+    result = cmpIgnorePegs(a, b, check, pegXid)
   elif timestamp == "RfcTime":
-    result = cmpIgnorePegs(a, b, pegRfcTimestamp, pegXid)
+    result = cmpIgnorePegs(a, b, check, pegRfcTimestamp, pegXid)
   elif timestamp == "UnixTime":
-    result = cmpIgnorePegs(a, b, pegUnixTimestamp, pegXid)
+    result = cmpIgnorePegs(a, b, check, pegUnixTimestamp, pegXid)
 
-proc cmpIgnoreDefaultTimestamps*(a, b: string): bool =
+proc cmpIgnoreDefaultTimestamps*(a, b: string; check: TOutputCheck): bool =
   ## true when input strings are equal without regard to timestamp
-  if cmpIgnorePegs(a, b, pegRfcTimestamp, pegXid):
+  if cmpIgnorePegs(a, b, check, pegRfcTimestamp, pegXid):
     result = true
-  elif cmpIgnorePegs(a, b, pegUnixTimestamp, pegXid):
+  elif cmpIgnorePegs(a, b, check, pegUnixTimestamp, pegXid):
     result = true
 
 proc parseCompileStream*(p: Process, output: Stream): CompileInfo =
